@@ -1,369 +1,641 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.optimize import linprog
+import matplotlib.patches as patches
 from fractions import Fraction
+import math
 
-# Page Configuration
+# --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Gomory's Fractional Cut Visualizer",
+    page_title="Gomory's Fractional Cut Lab (ILP)",
     page_icon="📐",
     layout="wide"
 )
 
-# Custom CSS for clean mathematical styling
 st.markdown("""
 <style>
-    .main-header {font-size: 2.2rem; font-weight: 700; color: #1E3A8A;}
-    .sub-header {font-size: 1.3rem; font-weight: 600; color: #2563EB; margin-top: 1rem;}
-    .math-box {
-        background-color: #F8FAFC;
-        border-left: 4px solid #2563EB;
-        padding: 15px;
-        border-radius: 5px;
-        margin: 10px 0;
+    .main-header {font-size: 2.1rem; font-weight: 700; color: #1E3A8A; margin-bottom: 0.2rem;}
+    .step-badge {
+        background-color: #DBEAFE; color: #1E40AF; padding: 4px 10px;
+        border-radius: 6px; font-weight: 600; font-size: 0.9rem;
+    }
+    .cut-card {
+        background-color: #F8FAFC; border-left: 4px solid #2563EB;
+        padding: 12px 16px; border-radius: 6px; margin-bottom: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">📐 Geometry of Gomory\'s Fractional Cut (ILP)</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">📐 Geometry & Simplex Lab: Gomory\'s Fractional Cuts</div>', unsafe_allow_html=True)
 st.write(
-    "Explore how **Gomory Cutting Planes** iteratively shave off non-integer regions of an LP relaxation "
-    "without removing any feasible integer lattice points."
+    "Solve the LP Relaxation, inspect the unit lattice square around the real optimum, "
+    "choose a Gomory cutting plane from the optimal simplex tableau, and observe how the feasible region tightens toward the integer optimum."
 )
 
-# --- SIDEBAR: PROBLEM SETUP ---
-st.sidebar.header("⚙️ Define 2-Variable ILP")
+# --- EXACT RATIONAL ARITHMETIC HELPERS ---
+def to_frac(val):
+    if isinstance(val, Fraction):
+        return val
+    return Fraction(val).limit_denominator(100000)
+
+def fmt_frac(val):
+    f = to_frac(val)
+    if f.denominator == 1:
+        return str(f.numerator)
+    return f"{f.numerator}/{f.denominator}"
+
+def frac_part(val):
+    """Strict positive fractional part f = val - floor(val), 0 <= f < 1."""
+    f = to_frac(val)
+    fl = math.floor(f)
+    return f - fl
+
+# --- EXACT SIMPLEX & DUAL SIMPLEX ENGINE ---
+def solve_initial_lp(c, A, b):
+    """
+    Solves Maximize c^T x subject to A x <= b, x >= 0 (with b >= 0)
+    using exact Fraction Simplex Method. Returns optimal tableau dictionary.
+    """
+    m = len(b)
+    n = len(c)
+    total_vars = n + m  # x1, x2, s1, s2, ...
+    var_names = [f"x{j+1}" for j in range(n)] + [f"s{i+1}" for i in range(m)]
+    
+    c_all = [to_frac(cj) for cj in c] + [Fraction(0)] * m
+    
+    # Build tableau rows: [coeffs..., rhs]
+    rows = []
+    for i in range(m):
+        row = [to_frac(A[i][j]) for j in range(n)] + [Fraction(1) if i == k else Fraction(0) for k in range(m)] + [to_frac(b[i])]
+        rows.append(row)
+        
+    basis = [n + i for i in range(m)]  # Initial slack variables
+    
+    max_iters = 50
+    for _ in range(max_iters):
+        # Compute Zj and Cj - Zj
+        zj = [sum(c_all[basis[i]] * rows[i][j] for i in range(m)) for j in range(total_vars)]
+        cj_minus_zj = [c_all[j] - zj[j] for j in range(total_vars)]
+        
+        # Check optimality (all Cj - Zj <= 0)
+        if all(val <= 0 for val in cj_minus_zj):
+            break
+            
+        # Entering variable: most positive Cj - Zj
+        enter_col = max(range(total_vars), key=lambda j: cj_minus_zj[j])
+        
+        # Leaving variable: minimum positive ratio
+        ratios = []
+        for i in range(m):
+            if rows[i][enter_col] > 0:
+                ratios.append((rows[i][-1] / rows[i][enter_col], i))
+        if not ratios:
+            return None  # Unbounded
+            
+        _, leave_row = min(ratios, key=lambda item: item[0])
+        
+        # Pivot
+        pivot_val = rows[leave_row][enter_col]
+        rows[leave_row] = [val / pivot_val for val in rows[leave_row]]
+        for i in range(m):
+            if i != leave_row:
+                factor = rows[i][enter_col]
+                rows[i] = [rows[i][j] - factor * rows[leave_row][j] for j in range(total_vars + 1)]
+        basis[leave_row] = enter_col
+        
+    return {
+        "rows": rows,
+        "basis": basis,
+        "c_all": c_all,
+        "var_names": var_names,
+        "n_orig": n
+    }
+
+def add_cut_and_reoptimize(tableau, cut_info):
+    """
+    Appends a selected Gomory cut row (in <= form with new slack variable)
+    and restores feasibility/optimality using the Dual Simplex Method.
+    """
+    rows = [r[:] for r in tableau["rows"]]
+    basis = tableau["basis"][:]
+    c_all = tableau["c_all"][:]
+    var_names = tableau["var_names"][:]
+    
+    m = len(rows)
+    total_vars = len(var_names)
+    new_slack_idx = total_vars
+    new_slack_name = f"s{m + 1}"
+    
+    # Expand existing rows with 0 column for the new slack variable
+    for i in range(m):
+        rhs = rows[i][-1]
+        rows[i] = rows[i][:-1] + [Fraction(0), rhs]
+        
+    # Construct the new cut row:
+    # Gomory cut: sum_{j in NB} f_ij * x_j >= f_i0
+    # Multiply by -1 and add new slack s_{m+1}:
+    # -sum_{j in NB} f_ij * x_j + s_{m+1} = -f_i0
+    new_row = [Fraction(0)] * (total_vars + 2)
+    for j, f_val in cut_info["nb_coeffs"].items():
+        new_row[j] = -f_val
+    new_row[new_slack_idx] = Fraction(1)
+    new_row[-1] = -cut_info["f_rhs"]
+    
+    rows.append(new_row)
+    basis.append(new_slack_idx)
+    c_all.append(Fraction(0))
+    var_names.append(new_slack_name)
+    
+    m += 1
+    total_vars += 1
+    
+    # Dual Simplex Iterations
+    for _ in range(50):
+        # Check primal feasibility (all RHS >= 0)
+        if all(rows[i][-1] >= 0 for i in range(m)):
+            break
+            
+        # Leaving variable: most negative RHS
+        leave_row = min(range(m), key=lambda i: rows[i][-1])
+        
+        # Compute Zj - Cj (for maximization optimal tableau, Zj - Cj >= 0)
+        zj_minus_cj = [
+            sum(c_all[basis[i]] * rows[i][j] for i in range(m)) - c_all[j]
+            for j in range(total_vars)
+        ]
+        
+        # Dual ratio test: min { (Zj - Cj) / |a_rj| : a_rj < 0 }
+        dual_ratios = []
+        for j in range(total_vars):
+            if rows[leave_row][j] < 0:
+                dual_ratios.append((zj_minus_cj[j] / abs(rows[leave_row][j]), j))
+                
+        if not dual_ratios:
+            return None  # Infeasible after cut
+            
+        _, enter_col = min(dual_ratios, key=lambda item: item[0])
+        
+        # Pivot
+        pivot_val = rows[leave_row][enter_col]
+        rows[leave_row] = [val / pivot_val for val in rows[leave_row]]
+        for i in range(m):
+            if i != leave_row:
+                factor = rows[i][enter_col]
+                rows[i] = [rows[i][j] - factor * rows[leave_row][j] for j in range(total_vars + 1)]
+        basis[leave_row] = enter_col
+        
+    return {
+        "rows": rows,
+        "basis": basis,
+        "c_all": c_all,
+        "var_names": var_names,
+        "n_orig": tableau["n_orig"]
+    }
+
+def extract_solution(tableau):
+    """Returns (x1, x2), Z, and boolean is_integer."""
+    m = len(tableau["rows"])
+    sol = {j: Fraction(0) for j in range(len(tableau["var_names"]))}
+    for i in range(m):
+        sol[tableau["basis"][i]] = tableau["rows"][i][-1]
+    x1, x2 = sol[0], sol[1]
+    z = sum(tableau["c_all"][tableau["basis"][i]] * tableau["rows"][i][-1] for i in range(m))
+    is_int = (x1.denominator == 1) and (x2.denominator == 1)
+    return (x1, x2), z, is_int
+
+def get_candidate_cuts(tableau, A_orig, b_orig):
+    """
+    Extracts all valid Gomory Fractional Cuts from rows of the optimal tableau
+    where the basic variable has a non-zero fractional RHS.
+    Projects each cut onto (x1, x2) space: alpha_1 * x1 + alpha_2 * x2 <= beta.
+    """
+    rows = tableau["rows"]
+    basis = tableau["basis"]
+    var_names = tableau["var_names"]
+    m = len(rows)
+    total_vars = len(var_names)
+    non_basic = [j for j in range(total_vars) if j not in basis]
+    
+    # Express every variable (x1, x2, s1, s2, ...) in terms of (x1, x2):
+    # x1 = 1*x1 + 0*x2 + 0
+    # x2 = 0*x1 + 1*x2 + 0
+    # s_k = b_k - A_k0*x1 - A_k1*x2   (for initial slacks k = 0, 1)
+    # Any higher slack s_r (r >= 2) from previous cuts is expressed recursively via its tableau/cut history,
+    # OR directly from the tableau row where it is non-basic!
+    # Even simpler and exact: every variable j has an exact affine representation in (x1, x2)
+    # obtained by solving for basic variables in terms of non-basic variables or tracking cut inequalities.
+    return non_basic
+
+def tableau_to_dataframe(tableau):
+    """Formats the exact Fraction tableau into a clean pandas DataFrame."""
+    rows = tableau["rows"]
+    basis = tableau["basis"]
+    c_all = tableau["c_all"]
+    var_names = tableau["var_names"]
+    m = len(rows)
+    total_vars = len(var_names)
+    
+    data = []
+    for i in range(m):
+        b_idx = basis[i]
+        row_dict = {
+            "CB": fmt_frac(c_all[b_idx]),
+            "Basic Var": var_names[b_idx],
+        }
+        for j, name in enumerate(var_names):
+            row_dict[name] = fmt_frac(rows[i][j])
+        row_dict["RHS (b)"] = fmt_frac(rows[i][-1])
+        row_dict["Frac(b)"] = fmt_frac(frac_part(rows[i][-1]))
+        data.append(row_dict)
+        
+    # Zj row
+    zj_row = {"CB": "", "Basic Var": "Zj"}
+    cj_zj_row = {"CB": "", "Basic Var": "Cj - Zj"}
+    for j, name in enumerate(var_names):
+        zj_val = sum(c_all[basis[i]] * rows[i][j] for i in range(m))
+        zj_row[name] = fmt_frac(zj_val)
+        cj_zj_row[name] = fmt_frac(c_all[j] - zj_val)
+        
+    z_total = sum(c_all[basis[i]] * rows[i][-1] for i in range(m))
+    zj_row["RHS (b)"] = f"Z = {fmt_frac(z_total)}"
+    zj_row["Frac(b)"] = ""
+    cj_zj_row["RHS (b)"] = ""
+    cj_zj_row["Frac(b)"] = ""
+    
+    data.append(zj_row)
+    data.append(cj_zj_row)
+    return pd.DataFrame(data)
+
+# --- SIDEBAR: PROBLEM INPUTS ---
+st.sidebar.header("1. Define 2-Variable ILP")
 
 preset = st.sidebar.selectbox(
-    "Choose a Preset Example",
+    "Select Problem Preset",
     [
-        "Classic Textbook Example (Max 5x₁ + 4x₂)",
-        "Steep Slope Example (Max 3x₁ + 4x₂)",
-        "Custom Problem"
+        "Textbook Classic (Max 5x₁ + 4x₂)",
+        "Example 2 (Max 7x₁ + 9x₂)",
+        "Example 3 (Max 3x₁ + 4x₂)",
+        "Custom Input"
     ]
 )
 
-if preset == "Classic Textbook Example (Max 5x₁ + 4x₂)":
-    c1_def, c2_def = 5.0, 4.0
-    a11_def, a12_def, b1_def = 1.0, 1.0, 5.0
-    a21_def, a22_def, b2_def = 10.0, 6.0, 45.0
-elif preset == "Steep Slope Example (Max 3x₁ + 4x₂)":
-    c1_def, c2_def = 3.0, 4.0
-    a11_def, a12_def, b1_def = 2.0, 1.0, 6.0
-    a21_def, a22_def, b2_def = 2.0, 3.0, 9.0
+if preset == "Textbook Classic (Max 5x₁ + 4x₂)":
+    c_def = (5, 4)
+    c1_def = (1, 1, 5)
+    c2_def = (10, 6, 45)
+elif preset == "Example 2 (Max 7x₁ + 9x₂)":
+    c_def = (7, 9)
+    c1_def = (-1, 3, 6)
+    c2_def = (7, 1, 35)
+elif preset == "Example 3 (Max 3x₁ + 4x₂)":
+    c_def = (3, 4)
+    c1_def = (2, 1, 6)
+    c2_def = (2, 3, 9)
 else:
-    c1_def, c2_def = 4.0, 3.0
-    a11_def, a12_def, b1_def = 2.0, 3.0, 12.0
-    a21_def, a22_def, b2_def = 4.0, 1.0, 11.0
+    c_def = (4, 3)
+    c1_def = (2, 3, 12)
+    c2_def = (4, 1, 11)
 
-st.sidebar.subheader("Objective Function (Maximise Z)")
+st.sidebar.markdown("**Objective: Maximise $Z = c_1 x_1 + c_2 x_2$**")
 col_c1, col_c2 = st.sidebar.columns(2)
-c1 = col_c1.number_input("Coeff of x₁ (c₁)", value=c1_def, step=1.0)
-c2 = col_c2.number_input("Coeff of x₂ (c₂)", value=c2_def, step=1.0)
+c1 = col_c1.number_input("c₁", value=int(c_def[0]), step=1)
+c2 = col_c2.number_input("c₂", value=int(c_def[1]), step=1)
 
-st.sidebar.subheader("Constraint 1: a₁₁x₁ + a₁₂x₂ ≤ b₁")
-c1_1, c1_2, c1_b = st.sidebar.columns(3)
-a11 = c1_1.number_input("a₁₁", value=a11_def, step=1.0)
-a12 = c1_2.number_input("a₁₂", value=a12_def, step=1.0)
-b1 = c1_b.number_input("b₁", value=b1_def, step=1.0)
+st.sidebar.markdown("**Constraint 1: $a_{11}x_1 + a_{12}x_2 \\le b_1$**")
+r1_1, r1_2, r1_b = st.sidebar.columns(3)
+a11 = r1_1.number_input("a₁₁", value=int(c1_def[0]), step=1)
+a12 = r1_2.number_input("a₁₂", value=int(c1_def[1]), step=1)
+b1 = r1_b.number_input("b₁", value=int(c1_def[2]), min_value=1, step=1)
 
-st.sidebar.subheader("Constraint 2: a₂₁x₁ + a₂₂x₂ ≤ b₂")
-c2_1, c2_2, c2_b = st.sidebar.columns(3)
-a21 = c2_1.number_input("a₂₁", value=a21_def, step=1.0)
-a22 = c2_2.number_input("a₂₂", value=a22_def, step=1.0)
-b2 = c2_b.number_input("b₂", value=b2_def, step=1.0)
+st.sidebar.markdown("**Constraint 2: $a_{21}x_1 + a_{22}x_2 \\le b_2$**")
+r2_1, r2_2, r2_b = st.sidebar.columns(3)
+a21 = r2_1.number_input("a₂₁", value=int(c2_def[0]), step=1)
+a22 = r2_2.number_input("a₂₂", value=int(c2_def[1]), step=1)
+b2 = r2_b.number_input("b₂", value=int(c2_def[2]), min_value=1, step=1)
 
-max_cuts = st.sidebar.slider("Number of Gomory Cuts to Apply", min_value=0, max_value=4, value=1)
+# --- SESSION STATE MANAGEMENT ---
+problem_signature = (c1, c2, a11, a12, b1, a21, a22, b2)
 
-# --- HELPER FUNCTIONS ---
-def to_frac_str(val, tol=1e-6):
-    """Convert float to clean p/q fraction string."""
-    if abs(val - round(val)) < tol:
-        return str(int(round(val)))
-    f = Fraction(val).limit_denominator(1000)
-    return f"{f.numerator}/{f.denominator}"
-
-def frac_part(val, tol=1e-7):
-    """Compute positive fractional part f = val - floor(val)."""
-    f = val - np.floor(val + tol)
-    if abs(f) < tol or abs(f - 1.0) < tol:
-        return 0.0
-    return f
-
-def solve_gomory_cuts(c, A_orig, b_orig, num_cuts):
-    """
-    Solves LP relaxation and iteratively generates Gomory fractional cuts
-    expressed in terms of the original decision variables (x1, x2).
-    """
-    A_curr = np.array(A_orig, dtype=float)
-    b_curr = np.array(b_orig, dtype=float)
-    
-    history = []
-    
-    for step in range(num_cuts + 1):
-        # Solve current LP relaxation: Maximize c^T x => Minimize -c^T x
-        res = linprog(-np.array(c), A_ub=A_curr, b_ub=b_curr, bounds=[(0, None), (0, None)], method='highs')
-        
-        if not res.success:
-            break
-            
-        x_opt = res.x
-        z_opt = -res.fun
-        
-        step_info = {
-            "step": step,
-            "A": A_curr.copy(),
-            "b": b_curr.copy(),
-            "x_opt": x_opt,
-            "z_opt": z_opt,
-            "is_integer": all(frac_part(val) == 0 for val in x_opt),
-            "cut_generated": None
+if "problem_sig" not in st.session_state or st.session_state.problem_sig != problem_signature:
+    st.session_state.problem_sig = problem_signature
+    init_tab = solve_initial_lp([c1, c2], [[a11, a12], [a21, a22]], [b1, b2])
+    st.session_state.steps = [
+        {
+            "tableau": init_tab,
+            "cuts_2d": [],  # List of tuples (alpha1, alpha2, beta, label)
+            "slack_2d_map": {
+                2: (-to_frac(a11), -to_frac(a12), to_frac(b1)),  # s1 = b1 - a11*x1 - a12*x2
+                3: (-to_frac(a21), -to_frac(a22), to_frac(b2)),  # s2 = b2 - a21*x1 - a22*x2
+            },
+            "chosen_cut_desc": "Initial LP Relaxation (No Gomory Cuts Applied)"
         }
-        
-        if step_info["is_integer"] or step == num_cuts:
-            history.append(step_info)
-            break
-            
-        # Construct optimal simplex tableau row via Basis Matrix B^-1
-        # Standard form: A_curr * x + I * s = b_curr
-        m = len(b_curr)
-        A_std = np.hstack([A_curr, np.eye(m)])
-        x_full = np.concatenate([x_opt, b_curr - A_curr @ x_opt])
-        
-        # Identify basic variables (m variables with largest values / non-zero)
-        # Use tolerance to pick m linearly independent basic columns
-        basic_indices = []
-        for idx in np.argsort(-x_full):
-            if len(basic_indices) < m:
-                candidate_cols = basic_indices + [idx]
-                if np.linalg.matrix_rank(A_std[:, candidate_cols]) == len(candidate_cols):
-                    basic_indices.append(idx)
-        basic_indices = sorted(basic_indices)
-        non_basic_indices = [j for j in range(2 + m) if j not in basic_indices]
-        
-        B = A_std[:, basic_indices]
-        B_inv = np.linalg.inv(B)
-        tableau = B_inv @ A_std
-        rhs = B_inv @ b_curr
-        
-        # Select source row with largest fractional part among basic decision variables (or any basic var)
-        best_row = -1
-        max_f = -1.0
-        for r_idx, b_var in enumerate(basic_indices):
-            f_val = frac_part(rhs[r_idx])
-            if f_val > max_f + 1e-6:
-                max_f = f_val
-                best_row = r_idx
-                
-        if best_row == -1 or max_f < 1e-6:
-            step_info["is_integer"] = True
-            history.append(step_info)
-            break
-            
-        # Gomory Cut in non-basic variables: sum_{j in NB} f_ij * x_j >= f_i0
-        f_rhs = frac_part(rhs[best_row])
-        cut_std = np.zeros(2 + m)
-        for j in non_basic_indices:
-            cut_std[j] = frac_part(tableau[best_row, j])
-            
-        # Substitute slack variables s_k = b_k - sum(A_kj * x_j) to express cut in (x1, x2) space:
-        # sum_{j=0,1} cut_std[j]*x_j + sum_{k=0..m-1} cut_std[2+k]*(b_k - A_k0*x1 - A_k1*x2) >= f_rhs
-        # Rearranging to <= form for plotting & next LP: alpha_1 * x1 + alpha_2 * x2 <= beta
-        s_coeffs = cut_std[2:]
-        alpha_1 = -(cut_std[0] - np.dot(s_coeffs, A_curr[:, 0]))
-        alpha_2 = -(cut_std[1] - np.dot(s_coeffs, A_curr[:, 1]))
-        beta = -(f_rhs - np.dot(s_coeffs, b_curr))
-        
-        step_info["cut_generated"] = {
-            "source_var": f"x_{basic_indices[best_row]+1}" if basic_indices[best_row] < 2 else f"s_{basic_indices[best_row]-1}",
-            "rhs_val": rhs[best_row],
-            "f_rhs": f_rhs,
-            "non_basic_terms": [(j, cut_std[j]) for j in non_basic_indices if cut_std[j] > 1e-6],
-            "alpha_1": alpha_1,
-            "alpha_2": alpha_2,
-            "beta": beta
+    ]
+
+if st.sidebar.button("🔄 Reset to Initial LP Relaxation", use_container_width=True):
+    init_tab = solve_initial_lp([c1, c2], [[a11, a12], [a21, a22]], [b1, b2])
+    st.session_state.steps = [
+        {
+            "tableau": init_tab,
+            "cuts_2d": [],
+            "slack_2d_map": {
+                2: (-to_frac(a11), -to_frac(a12), to_frac(b1)),
+                3: (-to_frac(a21), -to_frac(a22), to_frac(b2)),
+            },
+            "chosen_cut_desc": "Initial LP Relaxation (No Gomory Cuts Applied)"
         }
-        history.append(step_info)
-        
-        # Add new cut to constraints
-        A_curr = np.vstack([A_curr, [alpha_1, alpha_2]])
-        b_curr = np.append(b_curr, beta)
-        
-    return history
+    ]
+    st.rerun()
 
-# Run solver
-A_init = [[a11, a12], [a21, a22]]
-b_init = [b1, b2]
-c_vec = [c1, c2]
-history = solve_gomory_cuts(c_vec, A_init, b_init, max_cuts)
+# --- SIDEBAR: ZOOM CONTROLS ---
+st.sidebar.markdown("---")
+st.sidebar.header("2. Lattice Square Zoom Controls")
+zoom_mode = st.sidebar.radio(
+    "Graph View Mode",
+    ["Full Feasible Region", "Zoom into Unit Lattice Square"],
+    index=0
+)
+zoom_padding = st.sidebar.slider(
+    "Zoom Margin Around Lattice Square (units)",
+    min_value=0.2, max_value=3.0, value=0.8, step=0.2,
+    disabled=(zoom_mode == "Full Feasible Region"),
+    help="Decrease margin to zoom in tightly on the 1×1 integer square containing the current fractional optimal point."
+)
 
-# --- MAIN LAYOUT ---
-tab1, tab2 = st.tabs(["📊 Interactive Geometric Plot", "📖 Mathematical & Geometric Intuition"])
+# --- CURRENT STATE INSPECTION ---
+current_state = st.session_state.steps[-1]
+curr_tab = current_state["tableau"]
 
-with tab1:
-    if not history:
-        st.error("The LP problem is infeasible with the given constraints. Please adjust the sidebar values.")
+if curr_tab is None:
+    st.error("The problem is unbounded or infeasible with the current parameters. Please adjust the constraints in the sidebar.")
+    st.stop()
+
+(x1_opt, x2_opt), z_opt, is_integer = extract_solution(curr_tab)
+step_idx = len(st.session_state.steps) - 1
+
+# --- TOP STATUS BANNER ---
+col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+col_s1.metric("Current Stage", f"Stage {step_idx}" + (" (LP Relaxation)" if step_idx == 0 else f" (After {step_idx} Cut{'s' if step_idx>1 else ''})"))
+col_s2.metric("Optimal x₁", fmt_frac(x1_opt))
+col_s3.metric("Optimal x₂", fmt_frac(x2_opt))
+col_s4.metric("Objective Value (Z)", fmt_frac(z_opt))
+
+if is_integer:
+    st.success(f"🎉 **Integer Optimal Solution Reached!** $(x_1^*, x_2^*) = ({fmt_frac(x1_opt)}, {fmt_frac(x2_opt)})$ with $Z^* = {fmt_frac(z_opt)}$.")
+else:
+    lx, ly = math.floor(x1_opt), math.floor(x2_opt)
+    st.info(
+        f"📍 **Current Real Solution:** $({fmt_frac(x1_opt)}, {fmt_frac(x2_opt)})$ is **not integer**. "
+        f"It lies inside/on the unit lattice square $[{lx}, {lx+1}] \\times [{ly}, {ly+1}]$. "
+        f"Switch to **Zoom into Unit Lattice Square** in the sidebar to inspect which corner lattice point it will approach!"
+    )
+
+# --- MAIN LAYOUT: GRAPH (LEFT) + SIMPLEX & CUT SELECTOR (RIGHT) ---
+col_graph, col_right = st.columns([1.15, 1.15])
+
+with col_graph:
+    st.subheader("1. Geometric View & Unit Lattice Square")
+    
+    # Determine bounding box for full view
+    x_candidates = [5.0]
+    y_candidates = [5.0]
+    if a11 > 0: x_candidates.append(float(b1) / float(a11))
+    if a21 > 0: x_candidates.append(float(b2) / float(a21))
+    if a12 > 0: y_candidates.append(float(b1) / float(a12))
+    if a22 > 0: y_candidates.append(float(b2) / float(a22))
+    x_candidates.append(float(x1_opt) + 1.5)
+    y_candidates.append(float(x2_opt) + 1.5)
+    
+    full_xmax = max(x_candidates) * 1.12
+    full_ymax = max(y_candidates) * 1.12
+    
+    # Unit lattice square around current optimum
+    sq_x0 = math.floor(x1_opt)
+    sq_y0 = math.floor(x2_opt)
+    
+    if zoom_mode == "Zoom into Unit Lattice Square":
+        xmin = max(-0.2, sq_x0 - zoom_padding)
+        xmax = sq_x0 + 1.0 + zoom_padding
+        ymin = max(-0.2, sq_y0 - zoom_padding)
+        ymax = sq_y0 + 1.0 + zoom_padding
     else:
-        col_plot, col_details = st.columns([1.35, 1])
+        xmin, xmax = -0.3, full_xmax
+        ymin, ymax = -0.3, full_ymax
         
-        with col_plot:
-            st.subheader("Feasible Region, Integer Lattice & Cutting Planes")
+    x_grid = np.linspace(max(0, xmin), xmax, 400)
+    y_grid = np.linspace(max(0, ymin), ymax, 400)
+    X, Y = np.meshgrid(x_grid, y_grid)
+    
+    fig, ax = plt.subplots(figsize=(7.5, 6.2))
+    
+    # Shade Original LP Feasible Region
+    orig_feas = (a11 * X + a12 * Y <= b1 + 1e-6) & (a21 * X + a22 * Y <= b2 + 1e-6) & (X >= -1e-6) & (Y >= -1e-6)
+    ax.contourf(X, Y, orig_feas, levels=[0.5, 1.5], colors=['#CBD5E1'], alpha=0.45)
+    
+    # Shade Active Cut Feasible Region
+    curr_feas = orig_feas.copy()
+    for (al1, al2, bt, _) in current_state["cuts_2d"]:
+        curr_feas &= (float(al1) * X + float(al2) * Y <= float(bt) + 1e-6)
+    ax.contourf(X, Y, curr_feas, levels=[0.5, 1.5], colors=['#3B82F6'], alpha=0.32)
+    
+    # Highlight the Unit Lattice Square containing the current solution
+    lattice_rect = patches.Rectangle(
+        (sq_x0, sq_y0), 1.0, 1.0,
+        linewidth=2.2, edgecolor='#F59E0B', facecolor='#FEF3C7', alpha=0.35,
+        linestyle='--', zorder=2, label=f"Unit Lattice Square [{sq_x0},{sq_x0+1}]×[{sq_y0},{sq_y0+1}]"
+    )
+    ax.add_patch(lattice_rect)
+    
+    # Plot Original Constraints
+    x_line = np.linspace(max(0, xmin), xmax, 300)
+    if a12 != 0:
+        ax.plot(x_line, (b1 - a11 * x_line) / a12, 'k-', lw=1.8, label=f"C1: {a11}x₁ + {a12}x₂ ≤ {b1}")
+    elif a11 != 0:
+        ax.axvline(b1 / a11, color='k', lw=1.8, label=f"C1: {a11}x₁ ≤ {b1}")
+        
+    if a22 != 0:
+        ax.plot(x_line, (b2 - a21 * x_line) / a22, 'k--', lw=1.8, label=f"C2: {a21}x₁ + {a22}x₂ ≤ {b2}")
+    elif a21 != 0:
+        ax.axvline(b2 / a21, color='k', linestyle='--', lw=1.8, label=f"C2: {a21}x₁ ≤ {b2}")
+        
+    # Plot Applied Gomory Cutting Planes
+    cut_palette = ['#DC2626', '#7C3AED', '#059669', '#DB2777', '#EA580C']
+    for idx, (al1, al2, bt, lbl) in enumerate(current_state["cuts_2d"]):
+        col = cut_palette[idx % len(cut_palette)]
+        f_al1, f_al2, f_bt = float(al1), float(al2), float(bt)
+        if abs(f_al2) > 1e-9:
+            ax.plot(x_line, (f_bt - f_al1 * x_line) / f_al2, color=col, lw=2.4, linestyle='-.',
+                    label=f"Cut {idx+1}: {fmt_frac(al1)}x₁ + {fmt_frac(al2)}x₂ ≤ {fmt_frac(bt)}")
+        elif abs(f_al1) > 1e-9:
+            ax.axvline(f_bt / f_al1, color=col, lw=2.4, linestyle='-.',
+                       label=f"Cut {idx+1}: {fmt_frac(al1)}x₁ ≤ {fmt_frac(bt)}")
             
-            # Determine plot bounds
-            x_max_bound = max(b1 / max(a11, 0.1), b2 / max(a21, 0.1), 5) * 1.15
-            y_max_bound = max(b1 / max(a12, 0.1), b2 / max(a22, 0.1), 5) * 1.15
-            x_max_bound = min(x_max_bound, 25)
-            y_max_bound = min(y_max_bound, 25)
-            
-            x_vals = np.linspace(0, x_max_bound, 400)
-            y_vals = np.linspace(0, y_max_bound, 400)
-            X, Y = np.meshgrid(x_vals, y_vals)
-            
-            fig, ax = plt.subplots(figsize=(8, 6.5))
-            
-            # 1. Original LP Feasible Region (Light Gray)
-            orig_feasible = (a11 * X + a12 * Y <= b1 + 1e-5) & (a21 * X + a22 * Y <= b2 + 1e-5)
-            ax.contourf(X, Y, orig_feasible, levels=[0.5, 1.5], colors=['#CBD5E1'], alpha=0.45)
-            
-            # 2. Current Cut Feasible Region (Soft Blue)
-            final_state = history[-1]
-            curr_feasible = np.ones_like(X, dtype=bool)
-            for row_a, val_b in zip(final_state["A"], final_state["b"]):
-                curr_feasible &= (row_a[0] * X + row_a[1] * Y <= val_b + 1e-5)
-            ax.contourf(X, Y, curr_feasible, levels=[0.5, 1.5], colors=['#3B82F6'], alpha=0.35)
-            
-            # 3. Plot Original Constraint Lines
-            if a12 != 0:
-                ax.plot(x_vals, (b1 - a11 * x_vals) / a12, 'k-', lw=1.8, label=f"C1: {to_frac_str(a11)}x₁ + {to_frac_str(a12)}x₂ ≤ {to_frac_str(b1)}")
-            if a22 != 0:
-                ax.plot(x_vals, (b2 - a21 * x_vals) / a22, 'k--', lw=1.8, label=f"C2: {to_frac_str(a21)}x₁ + {to_frac_str(a22)}x₂ ≤ {to_frac_str(b2)}")
+    # Plot Integer Lattice Points
+    ix_vals = np.arange(max(0, int(math.floor(xmin))), int(math.ceil(xmax)) + 1)
+    iy_vals = np.arange(max(0, int(math.floor(ymin))), int(math.ceil(ymax)) + 1)
+    IX, IY = np.meshgrid(ix_vals, iy_vals)
+    IX_f, IY_f = IX.flatten(), IY.flatten()
+    
+    int_feas_mask = (a11 * IX_f + a12 * IY_f <= b1 + 1e-6) & (a21 * IX_f + a22 * IY_f <= b2 + 1e-6)
+    for (al1, al2, bt, _) in current_state["cuts_2d"]:
+        int_feas_mask &= (float(al1) * IX_f + float(al2) * IY_f <= float(bt) + 1e-6)
+        
+    ax.scatter(IX_f[~int_feas_mask], IY_f[~int_feas_mask], color='#94A3B8', s=30, alpha=0.55, zorder=3, label="Infeasible Integer Points")
+    ax.scatter(IX_f[int_feas_mask], IY_f[int_feas_mask], color='#0F172A', s=75, zorder=5, label="Feasible Integer Lattice Points")
+    
+    # Annotate integer coordinates when zoomed in
+    if zoom_mode == "Zoom into Unit Lattice Square":
+        for px, py in zip(IX_f, IY_f):
+            if xmin <= px <= xmax and ymin <= py <= ymax:
+                ax.annotate(f"({px},{py})", (px, py), textcoords="offset points", xytext=(6, 6),
+                            fontsize=9, fontweight='bold', color='#1E293B')
                 
-            # 4. Plot Gomory Cuts
-            cut_colors = ['#DC2626', '#D97706', '#7C3AED', '#059669']
-            for idx in range(2, len(final_state["b"])):
-                a_cut = final_state["A"][idx]
-                b_cut = final_state["b"][idx]
-                color = cut_colors[(idx - 2) % len(cut_colors)]
-                if abs(a_cut[1]) > 1e-6:
-                    ax.plot(x_vals, (b_cut - a_cut[0] * x_vals) / a_cut[1], color=color, lw=2.3, linestyle='-.',
-                            label=f"Gomory Cut {idx-1}: {to_frac_str(a_cut[0])}x₁ + {to_frac_str(a_cut[1])}x₂ ≤ {to_frac_str(b_cut)}")
-                elif abs(a_cut[0]) > 1e-6:
-                    ax.axvline(b_cut / a_cut[0], color=color, lw=2.3, linestyle='-.',
-                               label=f"Gomory Cut {idx-1}: x₁ ≤ {to_frac_str(b_cut / a_cut[0])}")
-            
-            # 5. Plot Integer Lattice Points
-            int_x = np.arange(0, int(np.floor(x_max_bound)) + 1)
-            int_y = np.arange(0, int(np.floor(y_max_bound)) + 1)
-            IX, IY = np.meshgrid(int_x, int_y)
-            IX_flat, IY_flat = IX.flatten(), IY.flatten()
-            
-            is_int_feas = (a11 * IX_flat + a12 * IY_flat <= b1 + 1e-5) & (a21 * IX_flat + a22 * IY_flat <= b2 + 1e-5)
-            
-            # Infeasible integer points
-            ax.scatter(IX_flat[~is_int_feas], IY_flat[~is_int_feas], color='#94A3B8', s=25, alpha=0.5, label="Infeasible Integer Points")
-            # Feasible integer points
-            ax.scatter(IX_flat[is_int_feas], IY_flat[is_int_feas], color='#1E293B', s=65, zorder=5, label="Feasible Integer Lattice Points")
-            
-            # 6. Plot LP Relaxation Optimal & Current Optimal
-            lp_opt = history[0]["x_opt"]
-            ax.scatter(lp_opt[0], lp_opt[1], color='#DC2626', s=140, marker='X', zorder=6,
-                       label=f"Initial LP Optimum ({to_frac_str(lp_opt[0])}, {to_frac_str(lp_opt[1])})")
-            
-            curr_opt = final_state["x_opt"]
-            marker_style = '*' if final_state["is_integer"] else 'D'
-            marker_color = '#16A34A' if final_state["is_integer"] else '#2563EB'
-            status_lbl = "Integer Optimum" if final_state["is_integer"] else "Current Cut LP Optimum"
-            ax.scatter(curr_opt[0], curr_opt[1], color=marker_color, s=180, marker=marker_style, zorder=7,
-                       label=f"{status_lbl} ({to_frac_str(curr_opt[0])}, {to_frac_str(curr_opt[1])})")
-            
-            # 7. Objective Function Iso-profit Contour through current optimum
-            if c2 != 0:
-                z_curr = final_state["z_opt"]
-                ax.plot(x_vals, (z_curr - c1 * x_vals) / c2, color='#10B981', linestyle=':', lw=1.5,
-                        label=f"Iso-Profit Line (Z = {to_frac_str(z_curr)})")
-            
-            ax.set_xlim(0, x_max_bound)
-            ax.set_ylim(0, y_max_bound)
-            ax.set_xlabel("x₁", fontsize=12, fontweight='bold')
-            ax.set_ylabel("x₂", fontsize=12, fontweight='bold')
-            ax.set_title("Geometric Shaving of Non-Integer Feasible Space", fontsize=13, fontweight='bold')
-            ax.grid(True, linestyle=':', alpha=0.6)
-            ax.legend(loc='upper right', fontsize=8.5, framealpha=0.92)
-            
-            st.pyplot(fig)
-            
-        with col_details:
-            st.subheader("Step-by-Step Algebraic & Geometric Breakdown")
-            
-            for state in history:
-                step_num = state["step"]
-                x1_str = to_frac_str(state["x_opt"][0])
-                x2_str = to_frac_str(state["x_opt"][1])
-                z_str = to_frac_str(state["z_opt"])
-                
-                with st.expander(f"Iteration {step_num}: {'LP Relaxation' if step_num == 0 else f'After Cut {step_num}'}", expanded=True):
-                    st.markdown(f"**Current LP Optimum:** $(x_1, x_2) = \\left({x1_str},\\; {x2_str}\\right)$")
-                    st.markdown(f"**Objective Value:** $Z = {z_str}$")
-                    
-                    if state["is_integer"]:
-                        st.success(f"🎉 **Integer Solution Found!** Both $x_1 = {x1_str}$ and $x_2 = {x2_str}$ are integers. Optimal ILP solution reached!")
-                    elif state["cut_generated"] is not None:
-                        cut = state["cut_generated"]
-                        st.warning("⚠️ Solution is fractional. Generating Gomory Cut...")
-                        
-                        # Build non-basic string
-                        nb_strs = []
-                        for var_idx, coeff in cut["non_basic_terms"]:
-                            v_name = f"x_{var_idx+1}" if var_idx < 2 else f"s_{var_idx-1}"
-                            nb_strs.append(f"\\frac{{{Fraction(coeff).limit_denominator(1000).numerator}}}{{{Fraction(coeff).limit_denominator(1000).denominator}}}{v_name}")
-                        
-                        lhs_nb = " + ".join(nb_strs) if nb_strs else "0"
-                        f_rhs_frac = Fraction(cut["f_rhs"]).limit_denominator(1000)
-                        
-                        st.markdown(f"""
-                        <div class="math-box">
-                        <b>1. Source Row ({cut['source_var']}):</b><br>
-                        Basic value $= {to_frac_str(cut['rhs_val'])} \\implies$ fractional part $f_0 = \\frac{{{f_rhs_frac.numerator}}}{{{f_rhs_frac.denominator}}}$<br><br>
-                        <b>2. Gomory Inequality (Non-Basic Space):</b><br>
-                        $${lhs_nb} \\ge \\frac{{{f_rhs_frac.numerator}}}{{{f_rhs_frac.denominator}}}$$
-                        <b>3. Projected onto $(x_1, x_2)$ Plane:</b><br>
-                        $${to_frac_str(cut['alpha_1'])}x_1 + {to_frac_str(cut['alpha_2'])}x_2 \\le {to_frac_str(cut['beta'])}$$
-                        </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        st.info("Increase the **Number of Gomory Cuts** slider in the sidebar to apply the next cutting plane.")
+    # Plot Initial LP Optimum (if cuts have been added)
+    init_x1, init_x2 = extract_solution(st.session_state.steps[0]["tableau"])[0]
+    if step_idx > 0:
+        ax.scatter(float(init_x1), float(init_x2), color='#991B1B', s=110, marker='x', zorder=6,
+                   label=f"Initial LP Opt ({fmt_frac(init_x1)}, {fmt_frac(init_x2)})")
+        
+    # Plot Current Optimum
+    curr_marker = '*' if is_integer else 'D'
+    curr_color = '#16A34A' if is_integer else '#DC2626'
+    curr_lbl = "Integer Optimum" if is_integer else "Current Real Optimum"
+    ax.scatter(float(x1_opt), float(x2_opt), color=curr_color, s=190, marker=curr_marker, zorder=7,
+               label=f"{curr_lbl} ({fmt_frac(x1_opt)}, {fmt_frac(x2_opt)})")
+    
+    # Iso-profit objective line through current optimum
+    if c2 != 0:
+        ax.plot(x_line, (float(z_opt) - c1 * x_line) / c2, color='#059669', linestyle=':', lw=1.6,
+                label=f"Iso-Profit Z = {fmt_frac(z_opt)}")
+        
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlabel("x₁", fontsize=11, fontweight='bold')
+    ax.set_ylabel("x₂", fontsize=11, fontweight='bold')
+    ax.set_title(
+        "Zoomed Unit Lattice Square View" if zoom_mode == "Zoom into Unit Lattice Square" else "Full Feasible Region & Cutting Planes",
+        fontsize=12, fontweight='bold'
+    )
+    ax.grid(True, linestyle=':', alpha=0.6)
+    ax.legend(loc='upper right', fontsize=8, framealpha=0.92)
+    st.pyplot(fig)
 
-with tab2:
-    st.subheader("How Does a Gomory Fractional Cut Work Geometrically?")
+with col_right:
+    st.subheader("2. Optimal Simplex Table (Exact p/q Form)")
+    df_tab = tableau_to_dataframe(curr_tab)
+    st.dataframe(df_tab, use_container_width=True, hide_index=True)
     
-    st.markdown("""
-    ### 1. The Core Geometric Idea: The Convex Hull
-    When we solve an **Integer Linear Programming (ILP)** problem by ignoring the integer requirement, we solve its **LP Relaxation**. 
-    Geometrically, the LP relaxation forms a continuous polytope (shaded gray in the plot). Because of linear programming theory, the optimal solution always occurs at a **vertex (corner point)** of this polytope—which frequently has fractional coordinates.
+    st.markdown("---")
+    st.subheader("3. Gomory Cutting Planes from Current Table")
     
-    The true feasible region of the ILP is just the set of **integer grid points (lattice points)** inside that polytope. If we could shrink-wrap those integer points tightly, the resulting shape is called the **Integer Convex Hull**. Every vertex of the Integer Convex Hull is guaranteed to be an integer point!
-    
-    ### 2. What a Gomory Cut Does
-    A **Gomory Fractional Cut** is a newly constructed linear constraint (hyperplane) that satisfies two strict geometric rules:
-    1. **Separating Hyperplane:** It strictly cuts off the current fractional LP optimal vertex (the red $\\times$ on the graph), making that fractional point infeasible.
-    2. **Validity (No Integer Points Lost):** Every single feasible integer lattice point inside the original region satisfies the new inequality. Not a single valid integer solution is ever sliced off.
-    
-    ### 3. Why the Algebra Guarantees This Geometry
-    In the optimal simplex tableau, suppose a basic variable $x_i$ has a fractional value:
-    $$x_i + \\sum_{j \\in NB} \\bar{a}_{ij} x_j = \\bar{b}_i$$
-    
-    We split every coefficient $\\bar{a}_{ij}$ and right-hand side $\\bar{b}_i$ into an **integer part** ($\\lfloor \\cdot \\rfloor$) and a **strictly non-negative fractional part** ($0 \\le f < 1$):
-    $$\\bar{a}_{ij} = \\lfloor \\bar{a}_{ij} \\rfloor + f_{ij}, \\qquad \\bar{b}_i = \\lfloor \\bar{b}_i \\rfloor + f_i$$
-    
-    Rearranging integers to the left and fractions to the right:
-    $$x_i + \\sum_{j \\in NB} \\lfloor \\bar{a}_{ij} \\rfloor x_j - \\lfloor \\bar{b}_i \\rfloor = f_i - \\sum_{j \\in NB} f_{ij} x_j$$
-    
-    * For any **integer solution**, the left-hand side must be an **integer**.
-    * Therefore, the right-hand side $f_i - \\sum f_{ij} x_j$ must also be an integer.
-    * Since $f_{ij} \\ge 0$ and $x_j \\ge 0$, we know $\\sum f_{ij} x_j \\ge 0$, which means $f_i - \\sum f_{ij} x_j \\le f_i < 1$.
-    * The largest integer strictly less than $1$ is **$0$**! Thus:
-    $$f_i - \\sum_{j \\in NB} f_{ij} x_j \\le 0 \\implies \\sum_{j \\in NB} f_{ij} x_j \\ge f_i$$
-    
-    **Geometric Punchline:** At the current LP optimum, all non-basic variables $x_j = 0$, making the left side $0 \\ge f_i$ (impossible since $f_i > 0$), so the fractional vertex is chopped off. Meanwhile, any integer point satisfies the inequality automatically!
-    """)
+    if is_integer:
+        st.success("All basic decision variables are integers. No further Gomory cuts are required!")
+    else:
+        # Build all candidate cuts from rows with fractional RHS
+        rows = curr_tab["rows"]
+        basis = curr_tab["basis"]
+        var_names = curr_tab["var_names"]
+        m = len(rows)
+        total_vars = len(var_names)
+        non_basic = [j for j in range(total_vars) if j not in basis]
+        slack_map = current_state["slack_2d_map"]
+        
+        candidate_cuts = []
+        for i in range(m):
+            rhs_val = rows[i][-1]
+            f_rhs = frac_part(rhs_val)
+            if f_rhs > 0:
+                b_var_name = var_names[basis[i]]
+                nb_coeffs = {}
+                nb_terms_str = []
+                
+                # Project cut onto (x1, x2) space:
+                # sum_{j in NB} f_ij * var_j >= f_rhs
+                # Substitute var_0 = x1, var_1 = x2, and slack var_j = c_x1*x1 + c_x2*x2 + const
+                lhs_x1 = Fraction(0)
+                lhs_x2 = Fraction(0)
+                lhs_const = Fraction(0)
+                
+                for j in non_basic:
+                    f_ij = frac_part(rows[i][j])
+                    nb_coeffs[j] = f_ij
+                    if f_ij > 0:
+                        nb_terms_str.append(f"({fmt_frac(f_ij)}){var_names[j]}")
+                        if j == 0:
+                            lhs_x1 += f_ij
+                        elif j == 1:
+                            lhs_x2 += f_ij
+                        elif j in slack_map:
+                            sx1, sx2, sconst = slack_map[j]
+                            lhs_x1 += f_ij * sx1
+                            lhs_x2 += f_ij * sx2
+                            lhs_const += f_ij * sconst
+                            
+                # Inequality is: lhs_x1 * x1 + lhs_x2 * x2 + lhs_const >= f_rhs
+                # Convert to <= form: (-lhs_x1)*x1 + (-lhs_x2)*x2 <= lhs_const - f_rhs
+                alpha_1 = -lhs_x1
+                alpha_2 = -lhs_x2
+                beta = lhs_const - f_rhs
+                
+                nb_ineq_str = (" + ".join(nb_terms_str) if nb_terms_str else "0") + f" ≥ {fmt_frac(f_rhs)}"
+                xy_ineq_str = f"({fmt_frac(alpha_1)})x₁ + ({fmt_frac(alpha_2)})x₂ ≤ {fmt_frac(beta)}"
+                
+                candidate_cuts.append({
+                    "row_idx": i,
+                    "source_var": b_var_name,
+                    "rhs_val": rhs_val,
+                    "f_rhs": f_rhs,
+                    "nb_coeffs": nb_coeffs,
+                    "nb_ineq_str": nb_ineq_str,
+                    "xy_ineq_str": xy_ineq_str,
+                    "alpha_1": alpha_1,
+                    "alpha_2": alpha_2,
+                    "beta": beta
+                })
+                
+        if not candidate_cuts:
+            st.warning("No fractional rows available to generate a Gomory cut.")
+        else:
+            st.write("Select which row's **Gomory Fractional Cut** you want to add to the problem:")
+            for c_idx, cut in enumerate(candidate_cuts):
+                st.markdown(f"""
+                <div class="cut-card">
+                    <b>Option {c_idx + 1} — Source Row: <code>{cut['source_var']}</code></b> (RHS = {fmt_frac(cut['rhs_val'])}, Fractional part $f_0$ = {fmt_frac(cut['f_rhs'])})<br>
+                    • <b>Non-Basic Cut Form:</b> <code>{cut['nb_ineq_str']}</code><br>
+                    • <b>2D Geometric Line:</b> <code>{cut['xy_ineq_str']}</code>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            cut_labels = [
+                f"Option {idx+1}: Row {c['source_var']}  →  {c['xy_ineq_str']}"
+                for idx, c in enumerate(candidate_cuts)
+            ]
+            selected_idx = st.radio("Choose Cutting Plane to Apply:", range(len(candidate_cuts)), format_func=lambda idx: cut_labels[idx])
+            
+            col_btn1, col_btn2 = st.columns([1.2, 1])
+            if col_btn1.button("✂️ Apply Chosen Cutting Plane", type="primary", use_container_width=True):
+                chosen_cut = candidate_cuts[selected_idx]
+                new_tab = add_cut_and_reoptimize(curr_tab, chosen_cut)
+                
+                # Register the newly created slack variable in slack_2d_map:
+                # alpha_1*x1 + alpha_2*x2 + s_new = beta  =>  s_new = (-alpha_1)*x1 + (-alpha_2)*x2 + beta
+                new_slack_idx = len(curr_tab["var_names"])
+                new_slack_map = dict(slack_map)
+                new_slack_map[new_slack_idx] = (-chosen_cut["alpha_1"], -chosen_cut["alpha_2"], chosen_cut["beta"])
+                
+                new_cuts_2d = list(current_state["cuts_2d"]) + [
+                    (chosen_cut["alpha_1"], chosen_cut["alpha_2"], chosen_cut["beta"], chosen_cut["xy_ineq_str"])
+                ]
+                
+                st.session_state.steps.append({
+                    "tableau": new_tab,
+                    "cuts_2d": new_cuts_2d,
+                    "slack_2d_map": new_slack_map,
+                    "chosen_cut_desc": chosen_cut["xy_ineq_str"]
+                })
+                st.rerun()
+                
+            if step_idx > 0:
+                if col_btn2.button("⬅️ Undo Last Cut", use_container_width=True):
+                    st.session_state.steps.pop()
+                    st.rerun()

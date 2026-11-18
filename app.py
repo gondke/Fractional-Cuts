@@ -19,9 +19,9 @@ st.markdown("""
         background-color: #F8FAFC; border-left: 4px solid #2563EB;
         padding: 12px 16px; border-radius: 6px; margin-bottom: 10px;
     }
-    .lattice-box {
-        background-color: #FFFBEB; border: 1px solid #F59E0B;
-        padding: 10px 14px; border-radius: 6px; margin-bottom: 10px;
+    .lattice-summary-card {
+        background-color: #FFFBEB; border-left: 4px solid #F59E0B;
+        padding: 10px 14px; border-radius: 6px; margin-top: 6px; font-size: 0.92rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -352,7 +352,7 @@ if "problem_sig" not in st.session_state or st.session_state.problem_sig != prob
             "chosen_cut_desc": "Initial LP Relaxation (No Gomory Cuts Applied)"
         }
     ]
-    st.session_state.zoom_margin = None  # None means Full Feasible Region
+    st.session_state.zoom_margin = None
 
 col_rst1, col_rst2 = st.sidebar.columns(2)
 if col_rst1.button("🔄 Reset Problem", use_container_width=True):
@@ -399,7 +399,7 @@ def render_status_banner():
         lx, ly = math.floor(x1_opt), math.floor(x2_opt)
         st.info(
             f"📍 **Non-Integer Real Solution:** $({fmt_frac(x1_opt)}, {fmt_frac(x2_opt)})$ lies inside/on the unit lattice square "
-            f"$[{lx}, {lx+1}] \\times [{ly}, {ly+1}]$. Use the zoom controls or choose a Gomory cutting plane to approach the integer optimum."
+            f"$[{lx}, {lx+1}] \\times [{ly}, {ly+1}]$. Inspect the isolated lattice squares on **Page 3** or apply a Gomory cutting plane!"
         )
     return current_state, curr_tab, (x1_opt, x2_opt), z_opt, is_integer, step_idx
 
@@ -410,11 +410,9 @@ def page_geometry():
     st.markdown('<div class="main-header">📐 Page 1: Geometric Feasible Region & Lattice Square Zoom</div>', unsafe_allow_html=True)
     current_state, curr_tab, (x1_opt, x2_opt), z_opt, is_integer, step_idx = render_status_banner()
 
-    # Unit lattice square enclosing current solution
     sq_x0 = math.floor(x1_opt)
     sq_y0 = math.floor(x2_opt)
 
-    # Interactive Zoom Control Bar
     st.markdown("### 🔍 Lattice Square Zoom & Pan Controls")
     z_col1, z_col2, z_col3, z_col4, z_col5 = st.columns([1.2, 1.2, 1.2, 1.2, 1.5])
 
@@ -448,7 +446,6 @@ def page_geometry():
         st.session_state.zoom_margin = margin_val
         st.rerun()
 
-    # Compute Bounding Box
     x_candidates = [5.0, float(x1_opt) + 1.5]
     y_candidates = [5.0, float(x2_opt) + 1.5]
     if a11 > 0: x_candidates.append(float(b1) / float(a11))
@@ -471,10 +468,8 @@ def page_geometry():
         ymax = sq_y0 + 1.0 + m_pad
         view_title = f"Zoomed View: Unit Lattice Square [{sq_x0}, {sq_x0+1}] × [{sq_y0}, {sq_y0+1}] (Margin = ±{m_pad})"
 
-    # Build Interactive Plotly Figure
     fig = go.Figure()
 
-    # Grid for shaded feasible regions
     gx = np.linspace(max(0, xmin), xmax, 220)
     gy = np.linspace(max(0, ymin), ymax, 220)
     GX, GY = np.meshgrid(gx, gy)
@@ -498,7 +493,6 @@ def page_geometry():
             showscale=False, hoverinfo="skip", name="Tightened Feasible Region"
         ))
 
-    # Highlight Unit Lattice Square
     fig.add_shape(
         type="rect",
         x0=sq_x0, y0=sq_y0, x1=sq_x0 + 1, y1=sq_y0 + 1,
@@ -512,7 +506,6 @@ def page_geometry():
         showarrow=False, font=dict(color="#B45309", size=11)
     )
 
-    # Original Constraint Lines
     x_line = np.linspace(max(0, xmin), xmax, 250)
     if a12 != 0:
         fig.add_trace(go.Scatter(
@@ -532,7 +525,6 @@ def page_geometry():
     elif a21 != 0:
         fig.add_vline(x=b2 / a21, line_color="#475569", line_width=2, line_dash="dash")
 
-    # Gomory Cutting Planes
     cut_colors = ["#DC2626", "#7C3AED", "#059669", "#DB2777", "#EA580C"]
     for idx, (al1, al2, bt, _) in enumerate(current_state["cuts_2d"]):
         col = cut_colors[idx % len(cut_colors)]
@@ -546,7 +538,6 @@ def page_geometry():
         elif abs(f_al1) > 1e-9:
             fig.add_vline(x=f_bt / f_al1, line_color=col, line_width=2.8, line_dash="dashdot")
 
-    # Integer Lattice Points
     ix_vals = np.arange(max(0, int(math.floor(xmin))), int(math.ceil(xmax)) + 1)
     iy_vals = np.arange(max(0, int(math.floor(ymin))), int(math.ceil(ymax)) + 1)
     IX, IY = np.meshgrid(ix_vals, iy_vals)
@@ -556,7 +547,6 @@ def page_geometry():
     for (al1, al2, bt, _) in current_state["cuts_2d"]:
         int_feas_mask &= (float(al1) * IX_f + float(al2) * IY_f <= float(bt) + 1e-6)
 
-    # Infeasible Integer Lattice Points
     fig.add_trace(go.Scatter(
         x=IX_f[~int_feas_mask], y=IY_f[~int_feas_mask],
         mode="markers",
@@ -565,7 +555,6 @@ def page_geometry():
         hovertemplate="Integer Point (%{x}, %{y}) — Infeasible<extra></extra>"
     ))
 
-    # Feasible Integer Lattice Points (with Z value hover)
     feas_ix = IX_f[int_feas_mask]
     feas_iy = IY_f[int_feas_mask]
     feas_z = [c1 * int(px) + c2 * int(py) for px, py in zip(feas_ix, feas_iy)]
@@ -583,17 +572,26 @@ def page_geometry():
         hovertemplate="Feasible Lattice Point (%{x}, %{y})<br>Objective Z = %{customdata}<extra></extra>"
     ))
 
-    # Initial LP Optimum marker (when cuts exist)
-    init_x1, init_x2 = extract_solution(st.session_state.steps[0]["tableau"])[0]
+    # Draw Step-by-Step Trajectory Arrows on the Main Plot
     if step_idx > 0:
+        pts_x = [float(extract_solution(s["tableau"])[0][0]) for s in st.session_state.steps]
+        pts_y = [float(extract_solution(s["tableau"])[0][1]) for s in st.session_state.steps]
         fig.add_trace(go.Scatter(
-            x=[float(init_x1)], y=[float(init_x2)],
-            mode="markers",
-            marker=dict(color="#991B1B", size=12, symbol="x"),
-            name=f"Initial LP Opt ({fmt_frac(init_x1)}, {fmt_frac(init_x2)})"
+            x=pts_x, y=pts_y,
+            mode="lines+markers",
+            line=dict(color="#F97316", width=2, dash="dot"),
+            marker=dict(color="#991B1B", size=9, symbol="x"),
+            name="Optimum Shift Path"
         ))
+        for k in range(len(pts_x) - 1):
+            fig.add_annotation(
+                x=pts_x[k + 1], y=pts_y[k + 1],
+                ax=pts_x[k], ay=pts_y[k],
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=3, arrowsize=1.3, arrowwidth=2,
+                arrowcolor="#EA580C"
+            )
 
-    # Current Optimum marker
     fig.add_trace(go.Scatter(
         x=[float(x1_opt)], y=[float(x2_opt)],
         mode="markers+text",
@@ -609,7 +607,6 @@ def page_geometry():
         + f" ({fmt_frac(x1_opt)}, {fmt_frac(x2_opt)})"
     ))
 
-    # Iso-profit line
     if c2 != 0:
         fig.add_trace(go.Scatter(
             x=x_line, y=(float(z_opt) - c1 * x_line) / c2,
@@ -622,7 +619,7 @@ def page_geometry():
         title=view_title,
         xaxis=dict(title="x₁", range=[xmin, xmax], dtick=1 if st.session_state.zoom_margin is not None else None, gridcolor="#E2E8F0"),
         yaxis=dict(title="x₂", range=[ymin, ymax], dtick=1 if st.session_state.zoom_margin is not None else None, gridcolor="#E2E8F0"),
-        height=620,
+        height=600,
         template="plotly_white",
         legend=dict(orientation="v", yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(255,255,255,0.88)"),
         dragmode="zoom"
@@ -630,7 +627,6 @@ def page_geometry():
 
     st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True, "displayModeBar": True})
 
-    # Quick Action Panel below Graph to Choose & Apply Cut Directly
     if not is_integer:
         st.markdown("---")
         st.subheader("✂️ Apply a Gomory Cutting Plane & Watch the Solution Shift")
@@ -688,7 +684,6 @@ def page_simplex():
                 apply_cut_action(candidate_cuts[selected_cut_idx])
                 st.rerun()
 
-    # Historical Tableaux Accordion
     if step_idx > 0:
         st.markdown("---")
         st.subheader("📜 Previous Iteration Tableaux History")
@@ -698,9 +693,424 @@ def page_simplex():
             with st.expander(f"Stage {past_idx}: {past_state['chosen_cut_desc']}  |  Solution: ({fmt_frac(px1)}, {fmt_frac(px2)}), Z = {fmt_frac(pz)}"):
                 st.dataframe(tableau_to_dataframe(past_state["tableau"]), use_container_width=True, hide_index=True)
 
+# ==============================================================================
+# PAGE 3: ISOLATED UNIT LATTICE SQUARES COMPARISON & TRAJECTORY
+# ==============================================================================
+def build_isolated_lattice_square_fig(stage_idx, steps_list, c1, c2, a11, a12, b1, a21, a22, b2):
+    """
+    Constructs a dedicated, zoomed-in plot of ONLY the unit lattice square
+    enclosing Stage `stage_idx`'s solution, annotated with:
+      - Feasible region inside the lattice square (blue)
+      - Region sliced off by Gomory cuts (hatched/pink)
+      - 4 Corner lattice vertices labeled with coordinates, Z-value, and feasibility symbol (● vs ○)
+      - Non-integer optimal point (◆) or Final integer point (★)
+      - Incoming arrow (from Stage k-1) and Outgoing arrow (to Stage k+1)
+      - Normal/push arrow on the newly applied Gomory cut showing the direction it shaves space
+    """
+    state = steps_list[stage_idx]
+    (x1_opt, x2_opt), z_opt, is_int = extract_solution(state["tableau"])
+    fx1, fx2 = float(x1_opt), float(x2_opt)
+
+    # Determine the 1x1 unit lattice square enclosing (x1_opt, x2_opt)
+    # If x1_opt or x2_opt is already an integer, frame the unit square [x0, x0+1] x [y0, y0+1]
+    # anchored at its integer coordinates (or shifted back 1 if on upper edge of previous square)
+    sq_x0 = math.floor(x1_opt)
+    sq_y0 = math.floor(x2_opt)
+    if x1_opt.denominator == 1 and sq_x0 > 0 and stage_idx > 0:
+        prev_x1 = extract_solution(steps_list[stage_idx - 1]["tableau"])[0][0]
+        if prev_x1 < x1_opt:
+            sq_x0 -= 1
+    if x2_opt.denominator == 1 and sq_y0 > 0 and stage_idx > 0:
+        prev_x2 = extract_solution(steps_list[stage_idx - 1]["tableau"])[0][1]
+        if prev_x2 < x2_opt:
+            sq_y0 -= 1
+
+    pad = 0.28
+    xmin, xmax = sq_x0 - pad, sq_x0 + 1.0 + pad
+    ymin, ymax = sq_y0 - pad, sq_y0 + 1.0 + pad
+
+    fig = go.Figure()
+
+    # Grid inside lattice square window
+    gx = np.linspace(xmin, xmax, 160)
+    gy = np.linspace(ymin, ymax, 160)
+    GX, GY = np.meshgrid(gx, gy)
+
+    orig_mask = (
+        (a11 * GX + a12 * GY <= b1 + 1e-6)
+        & (a21 * GX + a22 * GY <= b2 + 1e-6)
+        & (GX >= -1e-6)
+        & (GY >= -1e-6)
+    ).astype(float)
+
+    # Show shaved-off region in soft red if cuts exist
+    if state["cuts_2d"]:
+        curr_mask = orig_mask.copy()
+        for (al1, al2, bt, _) in state["cuts_2d"]:
+            curr_mask *= (float(al1) * GX + float(al2) * GY <= float(bt) + 1e-6).astype(float)
+
+        shaved_mask = np.clip(orig_mask - curr_mask, 0, 1)
+        fig.add_trace(go.Contour(
+            x=gx, y=gy, z=shaved_mask,
+            contours=dict(start=0.5, end=1.5, size=1, coloring="fill"),
+            colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(239, 68, 68, 0.22)"]],
+            showscale=False, hoverinfo="skip", name="Shaved-Off Region"
+        ))
+        fig.add_trace(go.Contour(
+            x=gx, y=gy, z=curr_mask,
+            contours=dict(start=0.5, end=1.5, size=1, coloring="fill"),
+            colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(59, 130, 246, 0.28)"]],
+            showscale=False, hoverinfo="skip", name="Remaining Feasible"
+        ))
+    else:
+        fig.add_trace(go.Contour(
+            x=gx, y=gy, z=orig_mask,
+            contours=dict(start=0.5, end=1.5, size=1, coloring="fill"),
+            colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(59, 130, 246, 0.24)"]],
+            showscale=False, hoverinfo="skip", name="LP Feasible Region"
+        ))
+
+    # Draw the isolated 1x1 Unit Lattice Square boundary
+    fig.add_shape(
+        type="rect",
+        x0=sq_x0, y0=sq_y0, x1=sq_x0 + 1, y1=sq_y0 + 1,
+        line=dict(color="#D97706", width=3, dash="solid"),
+        fillcolor="rgba(254, 243, 199, 0.12)",
+        layer="below"
+    )
+
+    # Original constraint lines passing through the lattice square
+    x_line = np.linspace(xmin, xmax, 150)
+    if a12 != 0:
+        fig.add_trace(go.Scatter(
+            x=x_line, y=(b1 - a11 * x_line) / a12, mode="lines",
+            line=dict(color="#334155", width=1.6),
+            name=f"C1: {a11}x₁+{a12}x₂≤{b1}"
+        ))
+    if a22 != 0:
+        fig.add_trace(go.Scatter(
+            x=x_line, y=(b2 - a21 * x_line) / a22, mode="lines",
+            line=dict(color="#64748B", width=1.6, dash="dash"),
+            name=f"C2: {a21}x₁+{a22}x₂≤{b2}"
+        ))
+
+    # Plot Gomory cuts active at this stage + push arrows
+    cut_colors = ["#DC2626", "#7C3AED", "#059669", "#DB2777", "#EA580C"]
+    for idx, (al1, al2, bt, _) in enumerate(state["cuts_2d"]):
+        col = cut_colors[idx % len(cut_colors)]
+        f_al1, f_al2, f_bt = float(al1), float(al2), float(bt)
+        is_latest = (idx == len(state["cuts_2d"]) - 1)
+        if abs(f_al2) > 1e-9:
+            y_cut = (f_bt - f_al1 * x_line) / f_al2
+            fig.add_trace(go.Scatter(
+                x=x_line, y=y_cut, mode="lines",
+                line=dict(color=col, width=3.2 if is_latest else 1.8, dash="dashdot"),
+                name=f"Cut {idx+1}: {fmt_frac(al1)}x₁+{fmt_frac(al2)}x₂≤{fmt_frac(bt)}"
+            ))
+            # Add inward normal arrow on the latest cut showing feasible half-space direction
+            if is_latest:
+                mid_x = sq_x0 + 0.5
+                mid_y = (f_bt - f_al1 * mid_x) / f_al2
+                if ymin <= mid_y <= ymax:
+                    norm = math.hypot(f_al1, f_al2)
+                    if norm > 0:
+                        nx, ny = -f_al1 / norm * 0.18, -f_al2 / norm * 0.18
+                        fig.add_annotation(
+                            x=mid_x + nx, y=mid_y + ny,
+                            ax=mid_x, ay=mid_y,
+                            xref="x", yref="y", axref="x", ayref="y",
+                            showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=2,
+                            arrowcolor=col
+                        )
+        elif abs(f_al1) > 1e-9:
+            vx = f_bt / f_al1
+            fig.add_vline(x=vx, line_color=col, line_width=3.2 if is_latest else 1.8, line_dash="dashdot")
+
+    # Evaluate the 4 Lattice Corners of the Unit Square
+    corners = [
+        (sq_x0, sq_y0),
+        (sq_x0 + 1, sq_y0),
+        (sq_x0, sq_y0 + 1),
+        (sq_x0 + 1, sq_y0 + 1),
+    ]
+    for (cx, cy) in corners:
+        feas = (cx >= 0) and (cy >= 0) and (a11 * cx + a12 * cy <= b1 + 1e-6) and (a21 * cx + a22 * cy <= b2 + 1e-6)
+        for (al1, al2, bt, _) in state["cuts_2d"]:
+            feas &= (float(al1) * cx + float(al2) * cy <= float(bt) + 1e-6)
+
+        z_corner = c1 * cx + c2 * cy
+        is_curr_winner = is_int and (cx == int(x1_opt)) and (cy == int(x2_opt))
+
+        if is_curr_winner:
+            sym, m_col, m_sz, status_txt = "star", "#16A34A", 18, "★ OPTIMAL"
+        elif feas:
+            sym, m_col, m_sz, status_txt = "circle", "#0F172A", 12, "● Feasible"
+        else:
+            sym, m_col, m_sz, status_txt = "circle-open", "#94A3B8", 11, "○ Cut Off"
+
+        fig.add_trace(go.Scatter(
+            x=[cx], y=[cy], mode="markers",
+            marker=dict(symbol=sym, color=m_col, size=m_sz, line=dict(width=2, color=m_col)),
+            showlegend=False,
+            hovertemplate=f"Lattice Corner ({cx}, {cy})<br>Status: {status_txt}<br>Z = {z_corner}<extra></extra>"
+        ))
+
+        # Corner label positioning
+        y_off = -18 if cy == sq_y0 else 16
+        x_off = -8 if cx == sq_x0 else 8
+        fig.add_annotation(
+            x=cx, y=cy,
+            text=f"<b>({cx},{cy})</b> Z={z_corner}<br>{status_txt}",
+            showarrow=False,
+            xshift=x_off, yshift=y_off,
+            font=dict(size=10, color="#16A34A" if is_curr_winner else ("#0F172A" if feas else "#64748B")),
+            bgcolor="rgba(255,255,255,0.82)"
+        )
+
+    # Incoming Arrow from Previous Stage (if stage_idx > 0)
+    if stage_idx > 0:
+        (px1, px2), _, _ = extract_solution(steps_list[stage_idx - 1]["tableau"])
+        fpx1, fpx2 = float(px1), float(px2)
+        if abs(fpx1 - fx1) > 1e-6 or abs(fpx2 - fx2) > 1e-6:
+            fig.add_trace(go.Scatter(
+                x=[fpx1], y=[fpx2], mode="markers",
+                marker=dict(symbol="x", color="#991B1B", size=11),
+                showlegend=False,
+                hovertemplate=f"Previous Stage {stage_idx-1}: ({fmt_frac(px1)}, {fmt_frac(px2)})<extra></extra>"
+            ))
+            fig.add_annotation(
+                x=fx1, y=fx2, ax=fpx1, ay=fpx2,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=3, arrowsize=1.4, arrowwidth=2.5,
+                arrowcolor="#EA580C"
+            )
+            mid_ax, mid_ay = (fpx1 + fx1) / 2, (fpx2 + fx2) / 2
+            fig.add_annotation(
+                x=mid_ax, y=mid_ay,
+                text=f"<b>Step {stage_idx}</b>",
+                showarrow=False, yshift=11,
+                font=dict(size=10, color="#C2410C"),
+                bgcolor="rgba(255,247,237,0.9)"
+            )
+
+    # Outgoing Arrow Preview to Next Stage (if stage_idx < len(steps_list) - 1)
+    if stage_idx < len(steps_list) - 1:
+        (nx1, nx2), _, _ = extract_solution(steps_list[stage_idx + 1]["tableau"])
+        fnx1, fnx2 = float(nx1), float(nx2)
+        if abs(fnx1 - fx1) > 1e-6 or abs(fnx2 - fx2) > 1e-6:
+            fig.add_annotation(
+                x=fnx1, y=fnx2, ax=fx1, ay=fx2,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.3, arrowwidth=2,
+                arrowcolor="#2563EB"
+            )
+
+    # Current Solution Marker (if non-integer; integer star is already plotted at corner)
+    if not is_int:
+        fig.add_trace(go.Scatter(
+            x=[fx1], y=[fx2],
+            mode="markers+text",
+            text=[f"◆ ({fmt_frac(x1_opt)}, {fmt_frac(x2_opt)})"],
+            textposition="top left",
+            textfont=dict(size=11, color="#DC2626"),
+            marker=dict(symbol="diamond", color="#DC2626", size=14, line=dict(width=1.5, color="white")),
+            showlegend=False,
+            hovertemplate=f"Non-Integer Optimum ({fmt_frac(x1_opt)}, {fmt_frac(x2_opt)})<br>Z = {fmt_frac(z_opt)}<extra></extra>"
+        ))
+
+    fig.update_layout(
+        title=dict(
+            text=f"<b>Stage {stage_idx}: Square [{sq_x0},{sq_x0+1}]×[{sq_y0},{sq_y0+1}]</b><br><sup>Sol: ({fmt_frac(x1_opt)}, {fmt_frac(x2_opt)}) | Z = {fmt_frac(z_opt)}</sup>",
+            font=dict(size=13)
+        ),
+        xaxis=dict(range=[xmin, xmax], dtick=1, title="x₁", gridcolor="#E2E8F0", zeroline=True),
+        yaxis=dict(range=[ymin, ymax], dtick=1, title="x₂", gridcolor="#E2E8F0", zeroline=True),
+        height=410,
+        margin=dict(l=35, r=25, t=65, b=40),
+        template="plotly_white",
+        showlegend=False,
+        dragmode="zoom"
+    )
+    return fig, (sq_x0, sq_y0), (x1_opt, x2_opt), z_opt, is_int
+
+def page_lattice_squares():
+    st.markdown('<div class="main-header">🔲 Page 3: Isolated Unit Lattice Squares & Convergence Trajectory</div>', unsafe_allow_html=True)
+    current_state, curr_tab, (x1_opt, x2_opt), z_opt, is_integer, step_idx = render_status_banner()
+
+    # Legend / Symbol Key Banner
+    st.markdown("""
+    **Symbol & Arrow Legend:** &nbsp;
+    `◆` Non-Integer LP Optimum &nbsp;|&nbsp;
+    `★` Final Optimal Integer Point &nbsp;|&nbsp;
+    `●` Feasible Lattice Corner &nbsp;|&nbsp;
+    `○` Infeasible / Sliced-Off Corner &nbsp;|&nbsp;
+    `➔ (Orange)` Shift from Previous Stage &nbsp;|&nbsp;
+    `➔ (Blue)` Next Cut Shift &nbsp;|&nbsp;
+    `➔ (Cut Color)` Half-Space Kept by Cut
+    """)
+
+    steps_list = st.session_state.steps
+    num_stages = len(steps_list)
+
+    # Quick Cut Application Bar right on Page 3 so user can iteratively generate & compare squares
+    if not is_integer:
+        with st.expander("✂️ Apply Next Gomory Cutting Plane Directly from Here", expanded=True):
+            candidate_cuts = build_candidate_cuts(curr_tab, current_state["slack_2d_map"])
+            if candidate_cuts:
+                c1_col, c2_col = st.columns([2.6, 1])
+                cut_opts = [
+                    f"Cut from Row {c['source_var']} (RHS = {fmt_frac(c['rhs_val'])})  →  {c['xy_ineq_str']}"
+                    for c in candidate_cuts
+                ]
+                sel_i = c1_col.selectbox("Choose Gomory Cut to Add Next Lattice Square:", range(len(candidate_cuts)), format_func=lambda i: cut_opts[i])
+                if c2_col.button("✂️ Add Cut & Compare Square", type="primary", use_container_width=True):
+                    apply_cut_action(candidate_cuts[sel_i])
+                    st.rerun()
+
+    st.markdown("### 1. Side-by-Side Comparison of All Enclosing Unit Lattice Squares")
+    st.write("Each panel isolates **only the $1 \\times 1$ unit integer lattice square** enclosing the solution at that stage (use mouse scroll or box-drag inside any square to zoom further).")
+
+    # Display Lattice Squares in a 2-column (or 3-column if >= 3 stages) responsive grid
+    cols_per_row = 2 if num_stages <= 2 else 3
+    for row_start in range(0, num_stages, cols_per_row):
+        row_cols = st.columns(cols_per_row)
+        for offset in range(cols_per_row):
+            s_idx = row_start + offset
+            if s_idx < num_stages:
+                with row_cols[offset]:
+                    sq_fig, (sq_x0, sq_y0), (sx1, sx2), sz, s_int = build_isolated_lattice_square_fig(
+                        s_idx, steps_list, c1, c2, a11, a12, b1, a21, a22, b2
+                    )
+                    st.plotly_chart(sq_fig, use_container_width=True, config={"scrollZoom": True, "displayModeBar": True})
+
+                    # Summary card under each lattice square
+                    if s_idx == 0:
+                        delta_txt = "Starting Real LP Relaxation Optimum"
+                    else:
+                        prev_x, prev_z, _ = extract_solution(steps_list[s_idx - 1]["tableau"])
+                        dx1 = sx1 - prev_x[0]
+                        dx2 = sx2 - prev_x[1]
+                        dz = sz - prev_z
+                        delta_txt = f"Δx₁ = {fmt_frac(dx1)}, Δx₂ = {fmt_frac(dx2)}, ΔZ = {fmt_frac(dz)}"
+
+                    status_badge = "✅ Integer Optimal Reached" if s_int else f"⏳ Fractional Parts: ({fmt_frac(frac_part(sx1))}, {fmt_frac(frac_part(sx2))})"
+                    st.markdown(f"""
+                    <div class="lattice-summary-card">
+                        <b>Square:</b> [{sq_x0}, {sq_x0+1}] × [{sq_y0}, {sq_y0+1}] &nbsp;|&nbsp; {status_badge}<br>
+                        <b>Constraint Added:</b> <code>{steps_list[s_idx]['chosen_cut_desc']}</code><br>
+                        <b>Movement:</b> {delta_txt}
+                    </div>
+                    """, unsafe_allow_html=True)
+
+    # Combined Lattice Neighbourhood Trajectory Overview
+    st.markdown("---")
+    st.markdown("### 2. Combined Lattice Neighbourhood Trajectory (All Stages & Arrows)")
+    st.write("A unified view spanning **only the integer lattice squares visited** from the initial real solution to the current/final integer solution.")
+
+    all_pts = [extract_solution(s["tableau"])[0] for s in steps_list]
+    all_x = [float(p[0]) for p in all_pts]
+    all_y = [float(p[1]) for p in all_pts]
+
+    min_sq_x = min(math.floor(p[0]) for p in all_pts)
+    max_sq_x = max(math.floor(p[0]) + 1 for p in all_pts)
+    min_sq_y = min(math.floor(p[1]) for p in all_pts)
+    max_sq_y = max(math.floor(p[1]) + 1 for p in all_pts)
+
+    ov_xmin, ov_xmax = max(-0.3, min_sq_x - 0.5), max_sq_x + 0.5
+    ov_ymin, ov_ymax = max(-0.3, min_sq_y - 0.5), max_sq_y + 0.5
+
+    ov_fig = go.Figure()
+
+    # Draw dashed unit lattice square outlines for every visited square
+    visited_squares = set((math.floor(p[0]), math.floor(p[1])) for p in all_pts)
+    for (vx0, vy0) in visited_squares:
+        ov_fig.add_shape(
+            type="rect",
+            x0=vx0, y0=vy0, x1=vx0 + 1, y1=vy0 + 1,
+            line=dict(color="#F59E0B", width=2, dash="dash"),
+            fillcolor="rgba(254, 243, 199, 0.25)",
+            layer="below"
+        )
+
+    # Active cuts
+    x_ov = np.linspace(ov_xmin, ov_xmax, 200)
+    cut_colors = ["#DC2626", "#7C3AED", "#059669", "#DB2777", "#EA580C"]
+    for idx, (al1, al2, bt, _) in enumerate(current_state["cuts_2d"]):
+        col = cut_colors[idx % len(cut_colors)]
+        f_al1, f_al2, f_bt = float(al1), float(al2), float(bt)
+        if abs(f_al2) > 1e-9:
+            ov_fig.add_trace(go.Scatter(
+                x=x_ov, y=(f_bt - f_al1 * x_ov) / f_al2, mode="lines",
+                line=dict(color=col, width=2.4, dash="dashdot"),
+                name=f"Cut {idx+1}: {fmt_frac(al1)}x₁ + {fmt_frac(al2)}x₂ ≤ {fmt_frac(bt)}"
+            ))
+
+    # Lattice grid points in visited neighbourhood
+    ix_ov = np.arange(max(0, int(math.floor(ov_xmin))), int(math.ceil(ov_xmax)) + 1)
+    iy_ov = np.arange(max(0, int(math.floor(ov_ymin))), int(math.ceil(ov_ymax)) + 1)
+    IX_o, IY_o = np.meshgrid(ix_ov, iy_ov)
+    IX_of, IY_of = IX_o.flatten(), IY_o.flatten()
+
+    feas_ov = (a11 * IX_of + a12 * IY_of <= b1 + 1e-6) & (a21 * IX_of + a22 * IY_of <= b2 + 1e-6)
+    for (al1, al2, bt, _) in current_state["cuts_2d"]:
+        feas_ov &= (float(al1) * IX_of + float(al2) * IY_of <= float(bt) + 1e-6)
+
+    ov_fig.add_trace(go.Scatter(
+        x=IX_of[~feas_ov], y=IY_of[~feas_ov], mode="markers",
+        marker=dict(color="#94A3B8", size=9, symbol="circle-open"),
+        name="Infeasible / Cut-Off Lattice Points"
+    ))
+    ov_fig.add_trace(go.Scatter(
+        x=IX_of[feas_ov], y=IY_of[feas_ov], mode="markers+text",
+        text=[f"({int(px)},{int(py)})" for px, py in zip(IX_of[feas_ov], IY_of[feas_ov])],
+        textposition="bottom center",
+        marker=dict(color="#0F172A", size=11, symbol="circle"),
+        name="Feasible Lattice Points"
+    ))
+
+    # Trajectory path & stage markers
+    stage_labels = [
+        f"S{k}: ({fmt_frac(p[0])}, {fmt_frac(p[1])})"
+        for k, p in enumerate(all_pts)
+    ]
+    ov_fig.add_trace(go.Scatter(
+        x=all_x, y=all_y,
+        mode="lines+markers+text",
+        text=stage_labels,
+        textposition="top right",
+        line=dict(color="#EA580C", width=2.5, dash="dot"),
+        marker=dict(
+            size=[15 if (k == num_stages - 1 and is_integer) else 12 for k in range(num_stages)],
+            color=["#16A34A" if (k == num_stages - 1 and is_integer) else "#DC2626" for k in range(num_stages)],
+            symbol=["star" if (k == num_stages - 1 and is_integer) else "diamond" for k in range(num_stages)]
+        ),
+        name="Solution Trajectory"
+    ))
+
+    # Arrows connecting consecutive stages
+    for k in range(num_stages - 1):
+        ov_fig.add_annotation(
+            x=all_x[k + 1], y=all_y[k + 1],
+            ax=all_x[k], ay=all_y[k],
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True, arrowhead=3, arrowsize=1.5, arrowwidth=2.6,
+            arrowcolor="#EA580C"
+        )
+
+    ov_fig.update_layout(
+        title="Step-by-Step Convergence Path Across Unit Lattice Squares",
+        xaxis=dict(range=[ov_xmin, ov_xmax], dtick=1, title="x₁", gridcolor="#E2E8F0"),
+        yaxis=dict(range=[ov_ymin, ov_ymax], dtick=1, title="x₂", gridcolor="#E2E8F0"),
+        height=460,
+        template="plotly_white",
+        dragmode="zoom"
+    )
+    st.plotly_chart(ov_fig, use_container_width=True, config={"scrollZoom": True, "displayModeBar": True})
+
 # --- MULTI-PAGE NAVIGATION ---
 nav = st.navigation([
     st.Page(page_geometry, title="1. Geometric & Lattice Zoom View", icon="📐"),
-    st.Page(page_simplex, title="2. Simplex Tables & Cut Derivations", icon="📊")
+    st.Page(page_simplex, title="2. Simplex Tables & Cut Derivations", icon="📊"),
+    st.Page(page_lattice_squares, title="3. Isolated Lattice Squares & Arrows", icon="🔲")
 ])
 nav.run()
